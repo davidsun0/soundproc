@@ -1,8 +1,9 @@
-CFLAGS = -lpulse-simple -lm
+FLAGS = -lpulse-simple -lm
 
-all:
-	soundproc
+all: soundproc
 
-soundproc:
-	$(CC) -o soundproc soundproc.c $(CFLAGS)
+soundproc: soundproc.c
+	$(CC) soundproc.c -o soundproc $(FLAGS)
 
+clean:
+	rm soundproc
