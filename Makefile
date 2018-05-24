@@ -1,9 +1,16 @@
-FLAGS = -lpulse-simple -lm
+FLAGS = -Wall -lpulse-simple -lm
+CC = gcc
 
-all: soundproc
+all: composition
 
-soundproc: soundproc.c
-	$(CC) soundproc.c -o soundproc $(FLAGS)
+composition: soundproc.o composition.o
+	$(CC) soundproc.o composition.o -o composition$(FLAGS)
+
+composition.o: composition.c
+	$(CC) composition.c -c $(FLAGS)
+
+soundproc.o: soundproc.c soundproc.h
+	$(CC) soundproc.c soundproc.h -c $(FLAGS)
 
 clean:
-	rm soundproc
+	rm -f soundproc *.o
