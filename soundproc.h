@@ -23,7 +23,7 @@ void writeNote(
         float length
         );
 
-void init();
+void soundProcInit();
 void writeSamples(SAMPLE_DEPTH * data, int length, int start);
 void playSamples(char * appName, char * streamName);
 

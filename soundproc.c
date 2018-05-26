@@ -1,8 +1,9 @@
 #include "soundproc.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
+#include <time.h>
 
 #include <pulse/simple.h>
 #include <pulse/error.h>
@@ -27,7 +28,8 @@ Node *head;
 /**
  * Initializes the sound data structure.
  */
-void init(){
+void soundProcInit(){
+    // initialize sound data structure
     head = (Node *)malloc(sizeof(Node));
     if(head == NULL){
         fprintf(stderr, "Failed to allocate linked list");
@@ -39,6 +41,9 @@ void init(){
     head->length = 0;
     head->data = (SAMPLE_DEPTH *) malloc(sizeof(SAMPLE_DEPTH) *
             SAMPS_PER_NODE);
+
+    // seed random variable (for noise generation)
+    srand(time(NULL));
 }
 
 /**
