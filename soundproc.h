@@ -13,12 +13,17 @@
 // S16NE for signed 16 bit native endian
 #define PA_FORMAT PA_SAMPLE_S16NE
 
-
-void writeBuffer(void * buffer, int startsamp);
 void writeNote(float (*note)(float), float start, float length);
+void writeNote(
+        float (*note)(float),
+        float (*envelope)(float, float, float, float),
+        float freq,
+        float start,
+        float length
+        );
 
 void init();
 void writeSamples(SAMPLE_DEPTH * data, int length, int start);
 void playSamples(char * appName, char * streamName);
 
-#endif
+#endif  // SOUNDPROC_H

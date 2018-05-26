@@ -7,6 +7,14 @@
 #include <pulse/simple.h>
 #include <pulse/error.h>
 
+int min(int a, int b){
+    return a < b ? a : b;
+}
+
+int max(int a, int b){
+    return a > b ? a : b;
+}
+
 typedef struct Node {
     struct Node *prev;  // prev node
     struct Node *next;  // next node
@@ -15,8 +23,10 @@ typedef struct Node {
 } Node;
 
 Node *head;
-Node *curr;
 
+/**
+ * Initializes the sound data structure.
+ */
 void init(){
     head = (Node *)malloc(sizeof(Node));
     if(head == NULL){
@@ -29,43 +39,88 @@ void init(){
     head->length = 0;
     head->data = (SAMPLE_DEPTH *) malloc(sizeof(SAMPLE_DEPTH) *
             SAMPS_PER_NODE);
-
-    curr = head;
 }
 
-/*
- * Writes samples to the linked list.
+/**
+ * Writes samples to the sound data structure.
  * @param   data    pointer to PCM data
  * @param   length  number of samples in data
  * @param   start   sample offset to write data at
  */
 void writeSamples(SAMPLE_DEPTH *data, int length, int start){
-    int remaining = SAMPS_PER_NODE - (start + length);
-    printf("%d samples left in curr\n", remaining);
-
-    // TODO: calculate start node and start position
-
-    // if start + length < SAMPLE_DEPTH
-    if(remaining > length){
-        for(int i = 0; i < length; i ++){
-            // layer sound with existing samples
-            curr->data[start + i] += data[i];
+    Node *curr = head;
+    // calculate start node and start position
+    int frameStart = start;
+    while(frameStart > SAMPS_PER_NODE){
+        if(curr->next == NULL){
+            // allocate the next node
+            curr->next = (Node *)malloc(sizeof(Node));
+            curr->next->prev = curr;
+            curr->next->next = NULL;
+            curr->length = 0;
+            // don't have to allocate data on the way
+            curr->data = NULL;
         }
-        // curr->length += length;
-        curr->length = SAMPS_PER_NODE;
-        // node->length = max(node->length, start + length)
+        curr = curr->next;
+        frameStart -= SAMPS_PER_NODE;
+        if(start < SAMPS_PER_NODE && curr->data == NULL){
+            // allocate data of current node
+            curr->data = (SAMPLE_DEPTH *) malloc(sizeof(SAMPLE_DEPTH) *
+                    SAMPS_PER_NODE);
+        }
+        else{
+            curr->length = SAMPS_PER_NODE;
+        }
+    }
+
+    /*
+    while samples > 0
+        write as much as possible into current node
+        calculate how many more samples will need to be written
+    */
+    int dataStart = 0;
+    while(dataStart < length){
+        int toWrite = min(SAMPS_PER_NODE, length - dataStart);
+        printf("writing %d samples\n", toWrite);
+        for(int i = 0; i < toWrite; i ++){
+           curr->data[frameStart + i] += data[dataStart + i];
+        }
+        curr->length = max(curr->length, frameStart + toWrite);
+
+        // why am I so paranoid? This should never happen
+        if(curr->length > SAMPS_PER_NODE){
+            printf("something went terribly wrong.\n");
+            printf("%d samples in node at %p,", curr->length, curr);
+            printf(" %d were expected\n", SAMPS_PER_NODE);
+        }
+        printf("node length now %d\n", curr->length);
+        dataStart += toWrite;
+        
+        // if the data spills over into the next node, start at the
+        // beginning sample
+        frameStart = 0;
+        curr = curr->next;
+    }
+}
+
+/*
+void writeNote(
+        float (*note)(float),
+        float (*envelope)(float, float, float, float),
+        float freq,
+        float start,
+        float length
+        ){
+
         return;
-    }
-    else{
-        printf("need %d more samples, allocate more\n",
-                length - remaining);
-    }
 }
+*/
 
-void writeNote(float (*note)(float), float start, float length){
-    return;
-}
-
+/**
+ * Plays the entire composition through Pulse Audio.
+ * @param   appName     application name given to Pulse Audio
+ * @param   streamName  title of stream given to Pulse Audio
+ */
 void playSamples(char *appName, char *streamName){
     static const pa_sample_spec ss = {
         .format = PA_FORMAT,
@@ -89,19 +144,28 @@ void playSamples(char *appName, char *streamName){
     );
 
     if(s == NULL){
-        fprintf(stderr, "Failed to connect to Pulse Audio server");
+        fprintf(stderr, "Failed to connect to Pulse Audio server\n");
         return;
     }
 
-    printf("implement! only plays first node's data\n");
-    if(pa_simple_write(
+    // iterate through the list, playing all of the data
+    Node *curr = head;
+    while(curr != NULL){
+        printf("playing %d samples\n", curr->length);
+        if(pa_simple_write(
                 s,
-                head->data,
-                sizeof(*head->data) * head->length,
+                curr->data,
+                sizeof(SAMPLE_DEPTH) * curr->length,
                 &error) < 0){
-        fprintf(stderr, "failed to write to Pulse Audio");
+            fprintf(stderr, "failed to write to Pulse Audio\n");
+            if(curr->length == 0){
+                printf("most likely because wrote a length 0 buffer\n");
+            }
+        }
+        curr = curr->next;
     }
-    
+
+    // wait until all data is played and clean up
     pa_simple_drain(s, &error);
     pa_simple_free(s);
 }

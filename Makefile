@@ -1,5 +1,5 @@
 FLAGS = -Wall -lpulse-simple -lm
-CC = gcc
+CC = g++
 
 all: composition
 
@@ -10,7 +10,7 @@ composition.o: composition.c
 	$(CC) composition.c -c $(FLAGS)
 
 soundproc.o: soundproc.c soundproc.h
-	$(CC) soundproc.c soundproc.h -c $(FLAGS)
+	$(CC) soundproc.c -c $(FLAGS)
 
 clean:
 	rm -f composition *.o
