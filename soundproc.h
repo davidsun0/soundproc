@@ -16,8 +16,9 @@
 void writeNote(float (*note)(float), float start, float length);
 void writeNote(
         float (*note)(float),
-        float (*envelope)(float, float, float, float),
+        float (*envelope)(int, int),
         float freq,
+        float amplitude,
         float start,
         float length
         );

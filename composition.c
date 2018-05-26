@@ -1,10 +1,5 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <math.h>
-#include <string.h>
-
-#include <pulse/simple.h>
-#include <pulse/error.h>
 
 #include "soundproc.h"
 
@@ -63,50 +58,19 @@ float envelope(float percent){
     }
 }
 
+float tempEnvelope(int x, int len){
+    return envelope((float)x / len);
+}
+
 int main(int argc, char* argv[]){
     // setup format, sampling rate, and mono / stereo
 
-    //*
     init();
+    writeNote(&triangle, &tempEnvelope, 440, 8192, 0, 2);
+    writeNote(&triangle, &tempEnvelope, 554.4, 8192, 0.2, 1.8);
+    writeNote(&triangle, &tempEnvelope, 659.3, 8192, 0.4, 1.6);
+    writeNote(&triangle, &tempEnvelope, 880, 8192, 3, 1); 
 
-    int16_t buffer[48000];
-    float theta = 0;
-
-    // A
-    for(int i = 0; i < 48000; i ++){
-        theta += 2 * M_PI * 440.0 / SAMPLE_RATE;
-        if(theta > 2 * M_PI){
-            theta -= 2 * M_PI;
-        }
-        buffer[i] = 8192 * envelope(i / 48000.0) 
-            * square(theta);
-    }
-    writeSamples(buffer, 48000, 0);
-
-    // C#
-    theta = 0;
-    for(int i = 0; i < 40000; i ++){
-        theta += 2 * M_PI * 554.4 / SAMPLE_RATE;
-        if(theta > 2 * M_PI){
-            theta -= 2 * M_PI;
-        }
-        buffer[i] = 8192 * envelope(i / 40000.0) 
-            * triangle(theta);
-    }
-    writeSamples(buffer, 40000, 8000);
-    
-    // E
-    theta = 0;
-    for(int i = 0; i < 32000; i ++){
-        theta += 2 * M_PI * 659.3 / SAMPLE_RATE;
-        if(theta > 2 * M_PI){
-            theta -= 2 * M_PI;
-        }
-        buffer[i] = 8192 * envelope(i / 32000.0) 
-            * triangle(theta);
-    }
-    writeSamples(buffer, 32000, 16000);
-    
     playSamples(argv[0], argv[0]);
 }
 

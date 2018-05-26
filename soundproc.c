@@ -48,22 +48,30 @@ void init(){
  * @param   start   sample offset to write data at
  */
 void writeSamples(SAMPLE_DEPTH *data, int length, int start){
+    printf("[writing %d samples at %d]\n", length, start);
     Node *curr = head;
     // calculate start node and start position
+    // TODO: improve start node search
+    // I think keeping track of the last node and moving left or right
+    // from there can be much faster than starting at head every time
     int frameStart = start;
     while(frameStart > SAMPS_PER_NODE){
         if(curr->next == NULL){
+            printf("allocating new node\n");
             // allocate the next node
             curr->next = (Node *)malloc(sizeof(Node));
             curr->next->prev = curr;
             curr->next->next = NULL;
-            curr->length = 0;
+            curr->next->length = 0;
             // don't have to allocate data on the way
-            curr->data = NULL;
+            curr->next->data = NULL;
         }
+        printf("moving to new node\n");
+        curr->length = SAMPS_PER_NODE;
         curr = curr->next;
         frameStart -= SAMPS_PER_NODE;
-        if(start < SAMPS_PER_NODE && curr->data == NULL){
+        if(frameStart < SAMPS_PER_NODE && curr->data == NULL){
+            printf("allocating data for end node\n");
             // allocate data of current node
             curr->data = (SAMPLE_DEPTH *) malloc(sizeof(SAMPLE_DEPTH) *
                     SAMPS_PER_NODE);
@@ -80,20 +88,24 @@ void writeSamples(SAMPLE_DEPTH *data, int length, int start){
     */
     int dataStart = 0;
     while(dataStart < length){
-        int toWrite = min(SAMPS_PER_NODE, length - dataStart);
-        printf("writing %d samples\n", toWrite);
+        int toWrite = min(SAMPS_PER_NODE - frameStart, length);
+        printf("writing %d samples from %d to %d\n", toWrite,
+                frameStart, frameStart + length);
         for(int i = 0; i < toWrite; i ++){
            curr->data[frameStart + i] += data[dataStart + i];
         }
-        curr->length = max(curr->length, frameStart + toWrite);
+        printf("node length: %d -> ", curr->length);
+        curr->length = max(curr->length,
+                min(frameStart + toWrite, SAMPS_PER_NODE));
+        printf("%d\n", curr->length);
 
-        // why am I so paranoid? This should never happen
+        // This should never happen
         if(curr->length > SAMPS_PER_NODE){
             printf("something went terribly wrong.\n");
             printf("%d samples in node at %p,", curr->length, curr);
             printf(" %d were expected\n", SAMPS_PER_NODE);
         }
-        printf("node length now %d\n", curr->length);
+        // printf("node length now %d\n", curr->length);
         dataStart += toWrite;
         
         // if the data spills over into the next node, start at the
@@ -101,20 +113,33 @@ void writeSamples(SAMPLE_DEPTH *data, int length, int start){
         frameStart = 0;
         curr = curr->next;
     }
+    printf("\n\n");
 }
 
-/*
 void writeNote(
         float (*note)(float),
-        float (*envelope)(float, float, float, float),
+        float (*envelope)(int, int),
         float freq,
+        float amplitude,
         float start,
         float length
         ){
 
-        return;
+    int numSamples = length * SAMPLE_RATE;
+    SAMPLE_DEPTH *buffer = (SAMPLE_DEPTH *) malloc(sizeof(SAMPLE_DEPTH)
+            * numSamples);
+
+    float theta = 0;
+    for(int i = 0; i < numSamples; i ++){
+        theta += 2 * M_PI * freq / SAMPLE_RATE;
+        if(theta > 2 * M_PI){
+            theta -= 2 * M_PI;
+        }
+        buffer[i] = amplitude * envelope(i, numSamples) * note(theta);
+    }
+    writeSamples(buffer, numSamples, start * SAMPLE_RATE);
+    return;
 }
-*/
 
 /**
  * Plays the entire composition through Pulse Audio.
@@ -122,6 +147,7 @@ void writeNote(
  * @param   streamName  title of stream given to Pulse Audio
  */
 void playSamples(char *appName, char *streamName){
+    printf("playing samples through Pulse Audio...\n");
     static const pa_sample_spec ss = {
         .format = PA_FORMAT,
         .rate = SAMPLE_RATE,
