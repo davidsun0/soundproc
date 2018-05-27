@@ -25,9 +25,6 @@ typedef struct Node {
 
 Node *head;
 
-/**
- * Initializes the sound data structure.
- */
 void soundProcInit(){
     // initialize sound data structure
     head = (Node *)malloc(sizeof(Node));
@@ -46,12 +43,6 @@ void soundProcInit(){
     srand(time(NULL));
 }
 
-/**
- * Writes samples to the sound data structure.
- * @param   data    pointer to PCM data
- * @param   length  number of samples in data
- * @param   start   sample offset to write data at
- */
 void writeSamples(SAMPLE_DEPTH *data, int length, int start){
     printf("[writing %d samples at %d]\n", length, start);
     Node *curr = head;
@@ -93,7 +84,8 @@ void writeSamples(SAMPLE_DEPTH *data, int length, int start){
     */
     int dataStart = 0;
     while(dataStart < length){
-        int toWrite = min(SAMPS_PER_NODE - frameStart, length);
+        int toWrite = min(SAMPS_PER_NODE - frameStart,
+                length - dataStart);
         printf("writing %d samples from %d to %d\n", toWrite,
                 frameStart, frameStart + length);
         for(int i = 0; i < toWrite; i ++){
@@ -116,7 +108,20 @@ void writeSamples(SAMPLE_DEPTH *data, int length, int start){
         // if the data spills over into the next node, start at the
         // beginning sample
         frameStart = 0;
-        curr = curr->next;
+        if(dataStart < length){
+            printf("moving to next node...\n");
+            if(curr->next == NULL){
+                printf("next is null, allocating...\n");
+                curr->next = (Node *) malloc(sizeof(Node));
+                curr->next->prev = curr;
+                curr->next->next = NULL;
+                curr->next->length = 0;
+                curr->next->data = (SAMPLE_DEPTH *) malloc(
+                        sizeof(SAMPLE_DEPTH) * SAMPS_PER_NODE);
+            }
+            printf("moved to next node, %p\n", curr->next);
+            curr = curr->next;
+        }
     }
     printf("\n\n");
 }
@@ -126,11 +131,11 @@ void writeNote(
         float (*envelope)(int, int),
         float freq,
         float amplitude,
-        float start,
-        float length
+        int start,
+        int length
         ){
 
-    int numSamples = length * SAMPLE_RATE;
+    int numSamples = length;
     SAMPLE_DEPTH *buffer = (SAMPLE_DEPTH *) malloc(sizeof(SAMPLE_DEPTH)
             * numSamples);
 
@@ -142,15 +147,10 @@ void writeNote(
         }
         buffer[i] = amplitude * envelope(i, numSamples) * note(theta);
     }
-    writeSamples(buffer, numSamples, start * SAMPLE_RATE);
+    writeSamples(buffer, numSamples, start);
     return;
 }
 
-/**
- * Plays the entire composition through Pulse Audio.
- * @param   appName     application name given to Pulse Audio
- * @param   streamName  title of stream given to Pulse Audio
- */
 void playSamples(char *appName, char *streamName){
     printf("playing samples through Pulse Audio...\n");
     static const pa_sample_spec ss = {

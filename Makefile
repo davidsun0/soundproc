@@ -1,4 +1,4 @@
-FLAGS = -g -Wall -lpulse-simple -lm
+FLAGS = -g -Wall -lm -lpulse-simple
 CC = g++
 
 all: composition

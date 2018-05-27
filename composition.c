@@ -4,17 +4,30 @@
 #include "soundproc.h"
 #include "instruments.h"
 
+float triangle(float theta);
+float sine(float theta);
+float square(float theta);
+
+void playNote(
+        float (*note)(float),
+        float (*envelope)(int, int),
+        float freq,
+        float volume,
+        float start,
+        float length
+        );
+
 int main(int argc, char* argv[]){
     // setup format, sampling rate, and mono / stereo
 
     soundProcInit();
-    setEnvelope(960, 960, 0, 2000);
+    setASDR(960, 960, 0, 2000);
 
-    writeNote(&triangle, &envelope, 440, 8192, 0, 2);
-    writeNote(&triangle, &envelope, 554.4, 8192, 0.2, 1.8);
-    writeNote(&triangle, &envelope, 659.3, 8192, 0.4, 1.6);
-    writeNote(&triangle, &envelope, 880, 8192, 3, 1);
-
+    playNote(&triangle, &ASDR, 440, 1, 0, 2);
+    playNote(&square, &ASDR, 554.4, 1, 0.2, 1.8);
+    playNote(&sine, &ASDR, 659.3, 1, 0.4, 1.6);
+    playNote(&whiteNoise, &ASDR, 100, 1, 2.00, 0.8);
+    playNote(&triangle, &ASDR, 880, 1, 2.6, 1);
     playSamples(argv[0], argv[0]);
 }
 
