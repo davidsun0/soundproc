@@ -1,2 +1,5 @@
 # Common Lisp
 *.fasl
+
+# audio
+*.wav
