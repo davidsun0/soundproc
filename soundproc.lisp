@@ -44,6 +44,12 @@
                           sample-size
                           out)))))
 
+(defmacro ->> (&rest forms)
+  "thread last macro: pipes values by chaining s-exprs at the end"
+  (loop for f in forms
+	for acc = f then (append f (list acc))
+	finally (return acc)))
+
 (defun take (n stream)
   "realizes n values of a lazy stream as a list"
   (loop for i from 1 to n
@@ -73,6 +79,16 @@
   "generates a sample stream of silence"
   (cons 0 #'silent-stream))
 
+(defun noise-stream (&optional (granularity 16))
+  "generates an approximation of white noise
+  granularity is the n parameter to the Bates distribution - 
+  higher values better approximate white noise"
+  (l-cons (- (/ (loop for i from 1 to granularity
+		      sum (random 1.0))
+		granularity)
+	     0.5)
+	  (noise-stream granularity)))
+
 (defun saw-stream (freq)
   "generates a lazy stream of rising sawtooth wave samples"
   (let ((incr (/ freq *sample-rate*)))
@@ -97,31 +113,7 @@
     (l-stream ((value 0))
       (l-cons (sin value) (self (+ value incr))))))
 
-(defun noise-stream (&optional (granularity 16))
-  "generates an approximation of white noise
-  granularity is the n parameter to the Bates distribution - 
-  higher values better approximate white noise"
-  (l-cons (- (/ (loop for i from 1 to granularity
-		      sum (random 1.0))
-		granularity)
-	     0.5)
-	  (noise-stream granularity)))
-
 ;; HIGHER ORDER OPERATIONS
-
-(defun amplify (gain stream)
-  "amplifies the input stream by the gain factor"
-  (l-cons (* gain (car stream))
-	  (amplify gain (l-cdr stream))))
-
-;; this function is in dire need of a better name
-(defun change-volume-linearly (prev-gain next-gain timer stream)
-  (let ((incr (/ (- next-gain prev-gain) timer)))
-    (l-stream ((gain prev-gain) (stream stream))
-	      (if (< (+ gain incr) next-gain)
-		  (l-cons (* gain (car stream))
-			  (self (+ gain incr) (l-cdr stream)))
-		  (amplify next-gain stream)))))
 
 (defun stream-add (&rest stream-list)
   "mixes several streams together by sample addition"
@@ -129,10 +121,16 @@
     (l-cons (reduce #'+ (mapcar #'car streams))
 	    (self (mapcar #'l-cdr streams)))))
 
+(defun amplify (gain stream)
+  "amplifies the input stream by the gain factor"
+  (l-cons (* gain (car stream))
+	  (amplify gain (l-cdr stream))))
+
 ;; TODO: delay in seconds, not samples?
 (defun stream-delay (delay stream)
   (if (> delay 0)
-      (l-cons 0 (stream-delay (- delay 1) stream))))
+      (l-cons 0 (stream-delay (- delay 1) stream))
+      stream))
 
 (defun low-pass (alpha stream)
   "applies a low pass filter on the stream with dampening factor alpha"
@@ -152,3 +150,37 @@
 	(l-cons new-value (self new-value
 				(car stream)
 				(l-cdr stream))))))
+
+(defun effect-delay (effect delay stream)
+  "waits a number of samples before applying an effect to the stream"
+  (if (> delay 0)
+      (l-cons (car stream)
+	      (effect-delay effect (- delay 1) (l-cdr stream)))
+      (funcall effect stream)))
+
+(defun envelope (amps-and-timers stream)
+  "creates an envelope from alternating gain and timing values
+  for example, (envelope '(0 100 3 400 0) stream) starts off silent,
+  then gradually amplifies the stream to 3x in 100 samples,
+  and finally gradually decreases the gain to 0 over another 400 samples"
+  (assert (oddp (length amps-and-timers)))
+  (destructuring-bind
+      (amps timers)
+      (loop for (l r) on amps-and-timers by #'cddr
+	    collect l into left
+	    when r
+	      collect r into right
+	    finally (return (list left right)))
+    ;; value keeps track of samples passed (compared to timers)
+    (l-stream ((amps amps) (timers timers) (value 0) (stream stream))
+      (if timers
+	  (l-cons (let ((amp1 (first amps))
+		      (amp2 (second amps)))
+		  (->> (/ (- amp2 amp1) (first timers))
+			  (* value)
+			  (+ amp1)
+			  (* (car stream))))
+		  (if (>= value (first timers))
+		      (self (rest amps) (rest timers) 0 (l-cdr stream))
+		      (self amps timers (+ 1 value) (l-cdr stream))))
+	  (amplify (first amps) stream)))))
