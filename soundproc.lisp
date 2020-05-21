@@ -1,14 +1,30 @@
-(defvar *num-channels* 1)
-(defvar *sample-rate* 8000) ; samples per second
-(defvar *bytes-per-sample* 1) ; change to sample-depth-bytes ?
+;;; Utilities
+
+(defmacro ->> (form1 &rest forms)
+  "Clojure's thread last macro: pipes values by nesting expressions.
+  For example, (->> r (square) (* pi)) calculates the area of a circle."
+  (loop for f in (cons form1 forms)
+	for acc = f then (append f (list acc))
+	finally (return acc)))
+
+;;; Synthesis settings
+
+(defvar *num-channels* 1) ; streams currently only support one channel
+(defvar *sample-rate* 44100) ; samples per second
+(defvar *bytes-per-sample* 1) ; rename to sample-depth-bytes ?
 
 (defun write-int (value bytes file)
-  "writes the lower n bytes of an integer to file in little endian"
+  "Writes the lower n bytes of an integer to file in little endian."
   (loop for x from 0 to (- bytes 1)
         do (write-byte (logand (ash value (* x -8)) #xFF) file)))
 
-(defun write-wave (sound-stream sample-count &optional (filename "./out.wav"))
-  "writes n samples of a sound stream to WAVE file"
+;; Writes a lazy stream to file as a .WAV file in PCM format.
+;; Does not currently write metadata - this can be extended by including an
+;; INFO chunk.
+;; http://soundfile.sapp.org/doc/WaveFormat/
+(defun write-wave (sound-stream sample-count
+		   &optional (filename "./out.wav"))
+  "Writes n samples of a sound stream to WAVE file."
   (let ((sample-size (* *num-channels* *bytes-per-sample*)))
     (with-open-file (out filename
                          :direction :output
@@ -39,58 +55,59 @@
       ;; dump samples to disk
       (loop for i from 1 to sample-count
             for s = sound-stream then (l-cdr s)
-            do (write-int (round (+ (car s)
-                                    (* *bytes-per-sample* #x100 0.5)))
+            do (write-int (->>
+			   ;; center on middle PCM value to prevent popping
+			   (* *bytes-per-sample* #x100 0.5)
+			   (+ (car s))	; add stream sample value
+			   (round)) ; quantize to integer
                           sample-size
                           out)))))
 
-(defmacro ->> (&rest forms)
-  "thread last macro: pipes values by chaining s-exprs at the end"
-  (loop for f in forms
-	for acc = f then (append f (list acc))
-	finally (return acc)))
-
-(defun take (n stream)
-  "realizes n values of a lazy stream as a list"
-  (loop for i from 1 to n
-        for s = stream then (l-cdr s)
-        collect (car s)))
-
 (defun l-cdr (stream)
-  "lazily evaluates the cdr of a lazy stream"
+  "Lazily evaluates the cdr of a lazy stream."
   (funcall (cdr stream)))
 
 (defmacro l-cons (l-car l-cdr)
-  "creates a cons cell where the cdr is lazily evaluated via l-cdr"
+  "Creates a cons cell where the cdr is lazily realized via l-cdr."
   `(cons ,l-car (lambda () ,l-cdr)))
 
 (defmacro l-stream (arg-binds body)
-  "creates a lazy stream
-  acts like lambda, but arguments are bound to initial values
-  and anonymous recursion is available through the self symbol"
+  "Unhygenic macro that creates a lazy stream: exposes 'self.
+  Similar to the alambda anaphoric macro.
+  Creates a lazy stream where arguments are bound to initial values
+  and anonymous recursion is available through the self symbol."
   (let ((arg-syms (mapcar #'first  arg-binds))
 	(arg-vals (mapcar #'second arg-binds)))
     `(labels ((self ,arg-syms ,body))
        (self ,@arg-vals))))
 
-;; BASE STREAMS
+;;; Basic Soundwaves
 
-(defun silent-stream ()
-  "generates a sample stream of silence"
-  (cons 0 #'silent-stream))
+(defun silent-stream (&optional (value 0))
+  "Generates a sample stream of silence."
+  (l-cons value (self value)))
 
-(defun noise-stream (&optional (granularity 16))
-  "generates an approximation of white noise
-  granularity is the n parameter to the Bates distribution - 
-  higher values better approximate white noise"
-  (l-cons (- (/ (loop for i from 1 to granularity
-		      sum (random 1.0))
-		granularity)
-	     0.5)
-	  (noise-stream granularity)))
+;; The defining property of white noise is that it contains all frequencies,
+;; all with the same amplitude. This is computationally equivalent to
+;; generating Gaussian-distributed random samples. The Bates Distributtion
+;; is used as a replacement because not all properties of the Gaussian
+;; Distribution are desired or needed e.g. infinite range.
+(defun white-noise (&optional (granularity 16))
+  "Generates an approximation of white noise.
+  Granularity is the n parameter to the Bates distribution:
+  higher values better approximate white noise."
+  (l-cons (->>
+	   ;; Average N uniformly random variables
+	   ;; By the Central Limit Theorem, this approximates the Gaussian
+	   (/ (loop for i from 1 to granularity
+		    sum (random 1.0))
+	      granularity)
+	   (* (sqrt granularity))   ; normalize variance (i.e. volume)
+	   (+ -0.5))	            ; center range on 0 to match other waves
+	  (white-noise granularity)))
 
 (defun saw-stream (freq)
-  "generates a lazy stream of rising sawtooth wave samples"
+  "Generates a lazy stream of rising sawtooth wave samples."
   (let ((incr (/ freq *sample-rate*)))
     (l-stream ((value 0))
        (l-cons (- value 0.5)
@@ -99,7 +116,7 @@
 			 incr))))))
 
 (defun square-stream (freq &optional (duty-cycle 0.5))
-  "generates a lazy stream of square wave samples"
+  "Generates a lazy stream of square wave samples."
   (let ((incr (/ freq *sample-rate*)))
     (l-stream ((value 0))
       (l-cons (if (< value duty-cycle) -0.5 0.5)
@@ -108,40 +125,78 @@
 		      incr))))))
 
 (defun sine-stream (freq)
-  "generates a lazy stream of sine wave samples"
+  "Generates a lazy stream of sine wave samples."
   (let ((incr (/ (* freq 2 pi) *sample-rate*)))
     (l-stream ((value 0))
       (l-cons (sin value) (self (+ value incr))))))
 
-;; HIGHER ORDER OPERATIONS
+;;; Non-auditory simple streams
+
+(defun exp-decay (half-life)
+  (let ((rate (exp (/ (log 0.5) half-life))))
+    (l-stream ((value 1))
+      (l-cons value (self (* value rate))))))
+
+;;; Frequency modulated streams
+
+(defun fm-sine (stream)
+  (l-stream ((value 0) (stream stream))
+    (l-cons (sin value)
+	    (self (+ value (/ (* (car stream) 2 pi) *sample-rate*))
+		  (l-cdr stream)))))
+
+(defun fm-saw (stream)
+  (l-stream ((value 0) (stream stream))
+    (l-cons (+ value -0.5)
+	    (let ((next-value (+ value (/ (car stream)
+					    *sample-rate*))))
+		(self (if (<= next-value 1) next-value 0)
+		      (l-cdr stream))))))
+
+(defun fm-square (duty-cycle stream)
+  (l-stream ((value 0) (stream stream))
+	    (l-cons (if (> value duty-cycle) 0.5 -0.5)
+		    (let ((next-value (+ value (/ (car stream)
+						  *sample-rate*))))
+		      (self (if (<= next-value 1) next-value 0)
+			    (l-cdr stream))))))
+;;; Stream Filters
 
 (defun stream-add (&rest stream-list)
-  "mixes several streams together by sample addition"
+  "Mixes several streams together by sample addition."
   (l-stream ((streams stream-list))
     (l-cons (reduce #'+ (mapcar #'car streams))
 	    (self (mapcar #'l-cdr streams)))))
 
 (defun amplify (gain stream)
-  "amplifies the input stream by the gain factor"
+  "Amplifies the input stream by the gain factor."
   (l-cons (* gain (car stream))
 	  (amplify gain (l-cdr stream))))
 
-;; TODO: delay in seconds, not samples?
 (defun stream-delay (delay stream)
+  "Delays a stream for the given number of samples.
+  The value zero is returned until the wait time is over."
   (if (> delay 0)
       (l-cons 0 (stream-delay (- delay 1) stream))
       stream))
 
+(defun effect-delay (effect delay stream)
+  "Waits a number of samples before applying an effect to the stream."
+  (if (> delay 0)
+      (l-cons (car stream)
+	      (effect-delay effect (- delay 1) (l-cdr stream)))
+      (funcall effect stream)))
+
 (defun low-pass (alpha stream)
-  "applies a low pass filter on the stream with dampening factor alpha"
+  "Applies a low pass filter on the stream with dampening factor alpha."
   ;; https://en.wikipedia.org/wiki/Low-pass_filter#Simple_infinite_impulse_response_filter
   (l-stream ((value 0) (stream stream))
     (let ((new-value (+ (* alpha (car stream))
-			 (* (- 1 alpha) value))))
+			(* (- 1 alpha) value))))
 	(l-cons new-value (self new-value (l-cdr stream))))))
 
 (defun high-pass (alpha stream)
-  "applies a high pass filter on the stream with factor alpha"
+  "Applies a high pass filter on the stream with factor alpha."
   ;; https://en.wikipedia.org/wiki/High-pass_filter#Algorithmic_implementation
   (l-stream ((value 0)
 	     (prev-sample (car stream))
@@ -150,13 +205,6 @@
 	(l-cons new-value (self new-value
 				(car stream)
 				(l-cdr stream))))))
-
-(defun effect-delay (effect delay stream)
-  "waits a number of samples before applying an effect to the stream"
-  (if (> delay 0)
-      (l-cons (car stream)
-	      (effect-delay effect (- delay 1) (l-cdr stream)))
-      (funcall effect stream)))
 
 (defun envelope (amps-and-timers stream)
   "creates an envelope from alternating gain and timing values
@@ -184,3 +232,18 @@
 		      (self (rest amps) (rest timers) 0 (l-cdr stream))
 		      (self amps timers (+ 1 value) (l-cdr stream))))
 	  (amplify (first amps) stream)))))
+
+(defmacro def-filter (name args body)
+  (let ((args-stream (append args '(&optional stream))))
+    `(defun ,name ,args-stream
+       (if stream
+	   ,body
+	   (lambda (stream)
+	     (,name ,@args stream))))))
+
+(defun compose (filter &rest filters)
+  (lambda (stream)
+    (loop for f in (cons filter filters)
+	  for s = stream then (funcall f s)
+	  finally (return s))))
+
