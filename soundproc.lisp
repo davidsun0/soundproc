@@ -7,16 +7,16 @@
 	for acc = f then (append f (list acc))
 	finally (return acc)))
 
-;;; Synthesis settings
-
-(defvar *num-channels* 1) ; streams currently only support one channel
-(defvar *sample-rate* 44100) ; samples per second
-(defvar *bytes-per-sample* 1) ; rename to sample-depth-bytes ?
-
 (defun write-int (value bytes file)
   "Writes the lower n bytes of an integer to file in little endian."
   (loop for x from 0 to (- bytes 1)
         do (write-byte (logand (ash value (* x -8)) #xFF) file)))
+
+;;; Synthesis settings
+
+(defparameter *num-channels* 1) ; streams currently only support one channel
+(defparameter *sample-rate* 8000)
+(defparameter *sample-depth-bytes* 1)
 
 ;; Writes a lazy stream to file as a .WAV file in PCM format.
 ;; Does not currently write metadata - this can be extended by including an
@@ -25,7 +25,7 @@
 (defun write-wave (sound-stream sample-count
 		   &optional (filename "./out.wav"))
   "Writes n samples of a sound stream to WAVE file."
-  (let ((sample-size (* *num-channels* *bytes-per-sample*)))
+  (let ((sample-size (* *num-channels* *sample-depth-bytes*)))
     (with-open-file (out filename
                          :direction :output
                          :element-type 'unsigned-byte
@@ -46,7 +46,7 @@
       (write-int *sample-rate* 4 out)
       (write-int (* *sample-rate* sample-size) 4 out) ; byte rate
       (write-int sample-size 2 out)
-      (write-int (* 8 *bytes-per-sample*) 2 out)      ; bits per sample
+      (write-int (* 8 *sample-depth-bytes*) 2 out)      ; bits per sample
       ;; DATA CHUNK
       (loop for i across "data"
             do (write-byte (char-code i) out))
@@ -57,7 +57,7 @@
             for s = sound-stream then (l-cdr s)
             do (write-int (->>
 			   ;; center on middle PCM value to prevent popping
-			   (* *bytes-per-sample* #x100 0.5)
+			   (* *sample-depth-bytes* #x100 0.5)
 			   (+ (car s))	; add stream sample value
 			   (round)) ; quantize to integer
                           sample-size
@@ -81,11 +81,23 @@
     `(labels ((self ,arg-syms ,body))
        (self ,@arg-vals))))
 
-;;; Basic Soundwaves
-
-(defun silent-stream (&optional (value 0))
+(defun const-stream (&optional (value 0))
   "Generates a sample stream of silence."
-  (l-cons value (self value)))
+  ;; cache the cons cell to save on CPU and memory
+  (let ((l-cell (cons value nil)))
+    ;; create self-referential lazy cons cell
+    (setf (cdr l-cell) (lambda () l-cell))
+    l-cell))
+
+(defun as-stream (value)
+  "Converts constant values into constant streams.
+  Assumes that all cons cell inputs are lazy streams."
+  (if (consp value)
+      value
+      (const-stream value)))
+
+;;; Basic Soundwaves
+;; All basic waveforms have range [-1, 1]
 
 ;; The defining property of white noise is that it contains all frequencies,
 ;; all with the same amplitude. This is computationally equivalent to
@@ -100,18 +112,18 @@
 	   ;; Average N uniformly random variables
 	   ;; By the Central Limit Theorem, this approximates the Gaussian
 	   (/ (loop for i from 1 to granularity
-		    sum (random 1.0))
+		    sum (random 2.0))
 	      granularity)
 	   (* (sqrt granularity))   ; normalize variance (i.e. volume)
-	   (+ -0.5))	            ; center range on 0 to match other waves
+	   (+ -1))	            ; center range on 0 to match other waves
 	  (white-noise granularity)))
 
 (defun saw-stream (freq)
   "Generates a lazy stream of rising sawtooth wave samples."
   (let ((incr (/ freq *sample-rate*)))
     (l-stream ((value 0))
-       (l-cons (- value 0.5)
-	       (self (if (< (+ value incr) 1)
+       (l-cons (- value 1)
+	       (self (if (< (+ value incr) 2)
 			 (+ value incr)
 			 incr))))))
 
@@ -119,10 +131,25 @@
   "Generates a lazy stream of square wave samples."
   (let ((incr (/ freq *sample-rate*)))
     (l-stream ((value 0))
-      (l-cons (if (< value duty-cycle) -0.5 0.5)
+      (l-cons (if (< value duty-cycle) -1 1)
 	      (self (if (< (+ value incr) 1)
 		      (+ value incr)
 		      incr))))))
+
+(defun d-square (freq duty-cycle)
+  (l-stream ((freq freq) (duty duty-cycle) (value 0))
+    (l-cons (if (< value (car duty)) -1 1)
+	    (self (l-cdr freq)
+		  (l-cdr duty)
+		  (let ((next-value (+ value (/ (car freq)
+						*sample-rate*))))
+		    (if (< next-value 1)
+			next-value
+			0))))))
+
+(defun pseudo-write (stream samples)
+  (loop for i from 1 to samples
+	for s = stream then (l-cdr s)))
 
 (defun sine-stream (freq)
   "Generates a lazy stream of sine wave samples."
@@ -155,11 +182,12 @@
 
 (defun fm-square (duty-cycle stream)
   (l-stream ((value 0) (stream stream))
-	    (l-cons (if (> value duty-cycle) 0.5 -0.5)
+	    (l-cons (if (> value duty-cycle) 1 -1)
 		    (let ((next-value (+ value (/ (car stream)
 						  *sample-rate*))))
 		      (self (if (<= next-value 1) next-value 0)
 			    (l-cdr stream))))))
+
 ;;; Stream Filters
 
 (defun stream-add (&rest stream-list)
@@ -172,6 +200,12 @@
   "Amplifies the input stream by the gain factor."
   (l-cons (* gain (car stream))
 	  (amplify gain (l-cdr stream))))
+
+(defun d-amplify (gain-stream stream)
+  "Amplifies the input stream by a factor of the gain stream."
+  (l-cons (* (car gain-stream) (car stream))
+	  (d-amplify (l-cdr gain-stream)
+		     (l-cdr stream))))
 
 (defun stream-delay (delay stream)
   "Delays a stream for the given number of samples.
@@ -234,6 +268,7 @@
 	  (amplify (first amps) stream)))))
 
 (defmacro def-filter (name args body)
+  "Defines a filter as a transducer if a stream argument is not provided."
   (let ((args-stream (append args '(&optional stream))))
     `(defun ,name ,args-stream
        (if stream
@@ -242,8 +277,43 @@
 	     (,name ,@args stream))))))
 
 (defun compose (filter &rest filters)
+  "Composes several transducers into one."
   (lambda (stream)
     (loop for f in (cons filter filters)
 	  for s = stream then (funcall f s)
 	  finally (return s))))
 
+(defun bell (base-freq &optional (hcount 20))
+  (apply #'stream-add
+	 (loop for i from 1 to hcount
+	       collect
+	       (let ((freq (->> (+ 0.95 (random 0.1))
+				(* i base-freq))))
+		 (envelope (list (/ hcount i)
+				 ;; fade out based on frequency
+				 (/ (* *sample-rate* 5 440) freq)
+				 0)
+			   (sine-stream freq))))))
+
+(defun bell (base-freq &optional (hcount 20))
+  (apply #'stream-add
+	 (loop for i from 1 to hcount
+	       collect
+	       (let ((freq (->> (+ 0.90 (random 0.2))
+				(* i base-freq))))
+		 (d-amplify (->> (/ (* *sample-rate* 800) freq)
+				 (exp-decay)
+				 (amplify 10))
+			    (sine-stream freq))))))
+
+(defun simple-bell (base-freq)
+  (->> (loop for freq in '(0.56 0.92 1.19 1.71 2.0 2.74 3 3.76 4.07)
+	     collect (sine-stream (* base-freq freq)))
+       (mapcar (lambda (s) (envelope '(8 48000 0) s)))
+       (apply #'stream-add)))
+
+(defun glass-harp (base-freq)
+  (amplify 20
+  (d-amplify (stream-add (const-stream 1.0)
+			 (sine-stream 2))
+	     (sine-stream base-freq))))
