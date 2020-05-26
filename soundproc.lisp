@@ -7,6 +7,13 @@
 	for acc = f then (append f (list acc))
 	finally (return acc)))
 
+(defmacro -> (form1 &rest forms)
+  "Clojure's thread first macro: pipes values by nesting expressions."
+  (loop for f in (cons form1 forms)
+	for acc = f then (cons (first f)
+			       (cons acc (rest f)))
+	finally (return acc)))
+
 (defun write-int (value bytes file)
   "Writes the lower n bytes of an integer to file in little endian."
   (loop for x from 0 to (- bytes 1)
@@ -99,6 +106,41 @@
 ;;; Basic Soundwaves
 ;; All basic waveforms have range [-1, 1]
 
+(defun sine-stream (freq)
+  "Generates a lazy stream of sine wave samples."
+  (l-stream ((freq-s (as-stream freq)) (value 0))
+    (l-cons (sin value)
+	    (self (l-cdr freq-s)
+		  (-> (car freq-s)
+		      (* 2 pi)
+		      (/ *sample-rate*)
+		      (+ value))))))
+
+(defun square-stream (freq &optional (duty-cycle 0.5))
+  "Generates a lazy stream of square wave samples."
+  (l-stream ((freq-s (as-stream freq))
+	     (duty-s (as-stream duty-cycle))
+	     (value 0))
+    (l-cons (if (< value (car duty-s)) -1 1)
+	    (self (l-cdr freq-s)
+		  (l-cdr duty-s)
+		  (let ((incr (/ (car freq-s) *sample-rate*)))
+		    (if (< (+ value incr) 1)
+			(+ value incr)
+			incr))))))
+
+(defun saw-stream (freq)
+  "Generates a lazy stream of rising sawtooth wave samples."
+  (l-stream ((freq-s (as-stream freq)) (value 0))
+    (l-cons value
+	    (self (l-cdr freq-s)
+		  (let ((incr (-> (car freq-s)
+				  (/ *sample-rate*)
+				  (* 2))))
+		    (if (< (+ value incr) 1)
+			(+ value incr)
+			(+ -1 incr)))))))
+
 ;; The defining property of white noise is that it contains all frequencies,
 ;; all with the same amplitude. This is computationally equivalent to
 ;; generating Gaussian-distributed random samples. The Bates Distributtion
@@ -108,85 +150,31 @@
   "Generates an approximation of white noise.
   Granularity is the n parameter to the Bates distribution:
   higher values better approximate white noise."
-  (l-cons (->>
+  (l-cons (->
 	   ;; Average N uniformly random variables
 	   ;; By the Central Limit Theorem, this approximates the Gaussian
-	   (/ (loop for i from 1 to granularity
-		    sum (random 2.0))
-	      granularity)
-	   (* (sqrt granularity))   ; normalize variance (i.e. volume)
-	   (+ -1))	            ; center range on 0 to match other waves
+	   (loop for i from 1 to granularity
+		 sum (random 2.0))
+	   (/ granularity)
+	   (- 1)	      ; center range on 0 to match other waves
+	   (* (sqrt granularity)))  ; normalize variance (i.e. volume)
 	  (white-noise granularity)))
-
-(defun saw-stream (freq)
-  "Generates a lazy stream of rising sawtooth wave samples."
-  (let ((incr (/ freq *sample-rate*)))
-    (l-stream ((value 0))
-       (l-cons (- value 1)
-	       (self (if (< (+ value incr) 2)
-			 (+ value incr)
-			 incr))))))
-
-(defun square-stream (freq &optional (duty-cycle 0.5))
-  "Generates a lazy stream of square wave samples."
-  (let ((incr (/ freq *sample-rate*)))
-    (l-stream ((value 0))
-      (l-cons (if (< value duty-cycle) -1 1)
-	      (self (if (< (+ value incr) 1)
-		      (+ value incr)
-		      incr))))))
-
-(defun d-square (freq duty-cycle)
-  (l-stream ((freq freq) (duty duty-cycle) (value 0))
-    (l-cons (if (< value (car duty)) -1 1)
-	    (self (l-cdr freq)
-		  (l-cdr duty)
-		  (let ((next-value (+ value (/ (car freq)
-						*sample-rate*))))
-		    (if (< next-value 1)
-			next-value
-			0))))))
-
-(defun pseudo-write (stream samples)
-  (loop for i from 1 to samples
-	for s = stream then (l-cdr s)))
-
-(defun sine-stream (freq)
-  "Generates a lazy stream of sine wave samples."
-  (let ((incr (/ (* freq 2 pi) *sample-rate*)))
-    (l-stream ((value 0))
-      (l-cons (sin value) (self (+ value incr))))))
 
 ;;; Non-auditory simple streams
 
 (defun exp-decay (half-life)
+  "Creates an exponential decay stream whose value starts at one and has
+  a half life equal to the argument (in samples)."
   (let ((rate (exp (/ (log 0.5) half-life))))
     (l-stream ((value 1))
       (l-cons value (self (* value rate))))))
 
-;;; Frequency modulated streams
-
-(defun fm-sine (stream)
-  (l-stream ((value 0) (stream stream))
-    (l-cons (sin value)
-	    (self (+ value (/ (* (car stream) 2 pi) *sample-rate*))
-		  (l-cdr stream)))))
-
-(defun fm-saw (stream)
-  (l-stream ((value 0) (stream stream))
-    (l-cons (+ value -0.5)
-	    (let ((next-value (+ value (/ (car stream)
-					    *sample-rate*))))
-		(self (if (<= next-value 1) next-value 0)
-		      (l-cdr stream))))))
-
-(defun fm-square (duty-cycle stream)
-  (l-stream ((value 0) (stream stream))
-	    (l-cons (if (> value duty-cycle) 1 -1)
-		    (let ((next-value (+ value (/ (car stream)
-						  *sample-rate*))))
-		      (self (if (<= next-value 1) next-value 0)
-			    (l-cdr stream))))))
+(defun sine-range (low high freq)
+  "Convenience function for defining a sine wave with range from low to high
+  (inclusive) and the given frequency."
+  (stream-add (const-stream (+ low (/ (- high low) 2)))
+	      (amplify (/ (- high low) 2)
+		       (sine-stream freq))))
 
 ;;; Stream Filters
 
@@ -198,14 +186,10 @@
 
 (defun amplify (gain stream)
   "Amplifies the input stream by the gain factor."
-  (l-cons (* gain (car stream))
-	  (amplify gain (l-cdr stream))))
-
-(defun d-amplify (gain-stream stream)
-  "Amplifies the input stream by a factor of the gain stream."
-  (l-cons (* (car gain-stream) (car stream))
-	  (d-amplify (l-cdr gain-stream)
-		     (l-cdr stream))))
+  (l-stream ((gain-s (as-stream gain)) (stream stream))
+	    (l-cons (* (car gain-s) (car stream))
+		    (self (l-cdr gain-s)
+			  (l-cdr stream)))))
 
 (defun stream-delay (delay stream)
   "Delays a stream for the given number of samples.
@@ -214,20 +198,24 @@
       (l-cons 0 (stream-delay (- delay 1) stream))
       stream))
 
-(defun effect-delay (effect delay stream)
-  "Waits a number of samples before applying an effect to the stream."
-  (if (> delay 0)
-      (l-cons (car stream)
-	      (effect-delay effect (- delay 1) (l-cdr stream)))
-      (funcall effect stream)))
-
 (defun low-pass (alpha stream)
-  "Applies a low pass filter on the stream with dampening factor alpha."
+  "Applies a low pass filter on the stream with dampening factor alpha.
+  An alpha value of 1 does not change the input stream and a value of 0
+  discards all frequencies. Alpha values outside of [0, 1] are not well
+  defined."
   ;; https://en.wikipedia.org/wiki/Low-pass_filter#Simple_infinite_impulse_response_filter
   (l-stream ((value 0) (stream stream))
     (let ((new-value (+ (* alpha (car stream))
 			(* (- 1 alpha) value))))
-	(l-cons new-value (self new-value (l-cdr stream))))))
+      (l-cons new-value (self new-value (l-cdr stream))))))
+
+(defun low-sweep (alpha stream)
+  (l-stream ((alpha (as-stream alpha)) (stream stream) (value 0))
+    (let ((new-value (+ (* (car alpha) (car stream))
+			(* (- 1 (car alpha)) value))))
+	(l-cons new-value (self (l-cdr alpha)
+				(l-cdr stream)
+				new-value)))))
 
 (defun high-pass (alpha stream)
   "Applies a high pass filter on the stream with factor alpha."
@@ -240,34 +228,37 @@
 				(car stream)
 				(l-cdr stream))))))
 
-(defun envelope (amps-and-timers stream)
-  "creates an envelope from alternating gain and timing values
-  for example, (envelope '(0 100 3 400 0) stream) starts off silent,
-  then gradually amplifies the stream to 3x in 100 samples,
-  and finally gradually decreases the gain to 0 over another 400 samples"
-  (assert (oddp (length amps-and-timers)))
-  (destructuring-bind
-      (amps timers)
-      (loop for (l r) on amps-and-timers by #'cddr
-	    collect l into left
-	    when r
-	      collect r into right
-	    finally (return (list left right)))
-    ;; value keeps track of samples passed (compared to timers)
-    (l-stream ((amps amps) (timers timers) (value 0) (stream stream))
-      (if timers
-	  (l-cons (let ((amp1 (first amps))
-		      (amp2 (second amps)))
-		  (->> (/ (- amp2 amp1) (first timers))
-			  (* value)
-			  (+ amp1)
-			  (* (car stream))))
-		  (if (>= value (first timers))
-		      (self (rest amps) (rest timers) 0 (l-cdr stream))
-		      (self amps timers (+ 1 value) (l-cdr stream))))
-	  (amplify (first amps) stream)))))
+(defun piecewise (&rest vals-and-delays)
+  "Creates a linear peicewise function from alternating value and delay
+  values.
+  For example, (piecewise 0 1000 200 500 40) creates a stream that starts
+  at value 0, rises to 200 over 1000 samples, falls to 40 over 500 samples,
+  and finally holds constant at 40 indefinitely."
+  (assert (oddp (length vals-and-delays)))
+  (let ((vals   (loop for v on vals-and-delays by #'cddr
+		      collect (car v)))
+	(delays (loop for p on (cdr vals-and-delays) by #'cddr
+		      collect (car p))))
+    (l-stream ((vals vals) (delays delays) (value 0))
+      (if delays
+	  (l-cons (-> (- (second vals) (first vals))
+		      (/ (first delays))
+		      (* value)
+		      (+ (first vals)))
+		  (if (>= value (first delays))
+		      (self (rest vals) (rest delays) 0)
+		      (self vals delays (+ value 1))))
+	  (const-stream (first vals))))))
 
-(defmacro def-filter (name args body)
+(defun envelope (amps-and-timers stream)
+  "Creates an envelope from alternating gain and timing values.
+  See piecewise on how to specify the gain and timings."
+  (amplify (apply #'piecewise amps-and-timers)
+	   stream))
+
+;;; Transducer functionality (currently unused)
+
+(defmacro deffilter (name args body)
   "Defines a filter as a transducer if a stream argument is not provided."
   (let ((args-stream (append args '(&optional stream))))
     `(defun ,name ,args-stream
@@ -283,37 +274,101 @@
 	  for s = stream then (funcall f s)
 	  finally (return s))))
 
-(defun bell (base-freq &optional (hcount 20))
-  (apply #'stream-add
-	 (loop for i from 1 to hcount
-	       collect
-	       (let ((freq (->> (+ 0.95 (random 0.1))
-				(* i base-freq))))
-		 (envelope (list (/ hcount i)
-				 ;; fade out based on frequency
-				 (/ (* *sample-rate* 5 440) freq)
-				 0)
-			   (sine-stream freq))))))
+(defun effect-delay (effect delay stream)
+  "Waits a number of samples before applying an effect to the stream."
+  (if (> delay 0)
+      (l-cons (car stream)
+	      (effect-delay effect (- delay 1) (l-cdr stream)))
+      (funcall effect stream)))
+
+;;; Instruments
 
 (defun bell (base-freq &optional (hcount 20))
   (apply #'stream-add
 	 (loop for i from 1 to hcount
 	       collect
-	       (let ((freq (->> (+ 0.90 (random 0.2))
+	       (let ((freq (->> (+ 0.8 (random 0.4))
 				(* i base-freq))))
-		 (d-amplify (->> (/ (* *sample-rate* 800) freq)
+		 (amplify (->> (/ (* *sample-rate* 800) freq)
 				 (exp-decay)
 				 (amplify 10))
 			    (sine-stream freq))))))
 
-(defun simple-bell (base-freq)
-  (->> (loop for freq in '(0.56 0.92 1.19 1.71 2.0 2.74 3 3.76 4.07)
-	     collect (sine-stream (* base-freq freq)))
-       (mapcar (lambda (s) (envelope '(8 48000 0) s)))
-       (apply #'stream-add)))
+(defmacro partials ()
+  "Compile time series of random partial frequencies"
+  (cons 'list
+	(loop for i from 2 to 20
+	      collect
+					;(+ i (- (random 0.1) 0.05)
+	      (* i (+ 0.8 (random 0.4)))
+		 )))
+
+(defun bell-2 (base-freq)
+  (->> (cons (sine-stream base-freq)
+	     (loop for p in (partials)
+		   collect (sine-stream (* p base-freq))))
+       (apply #'stream-add)
+       (amplify 8)
+       (low-sweep (exp-decay 6000))))
 
 (defun glass-harp (base-freq)
   (amplify 20
-  (d-amplify (stream-add (const-stream 1.0)
-			 (sine-stream 2))
-	     (sine-stream base-freq))))
+  (amplify (stream-add (const-stream 1.0)
+		       (sine-stream 2))
+	   (sine-stream base-freq))))
+
+(defun pluck (freq)
+  (effect-delay (lambda (stream) (low-sweep (exp-decay 500)
+					    stream))
+		100
+		(envelope '(0 100 30)
+			  (square-stream freq))))
+
+(defun pluck (freq)
+  (->> (saw-stream freq)
+       ;; TODO: base constants on sample rate (8000)
+       (low-sweep (exp-decay 600))
+       ;; low-sweep doesn't reset to zero amplitude
+       (envelope '(0 100 30 6900 30 1000 0))))
+
+(defun pluck-2 (freq)
+  (->> (square-stream freq)
+       (envelope (list 0 (* *sample-rate* 0.01) 10
+		       (* *sample-rate* 0.24) 10 1 0))))
+
+(defun arpeg-0 (octave)
+  (apply #'stream-add
+	 (loop for freq in '(277.18 311.13 415.30)
+	       for i from 0
+	       collect (stream-delay (* i (/ *sample-rate* 4))
+				     (pluck-2 (* octave freq))))))
+
+       (envelope (list 0
+		       (* *sample-rate* len 0.05) 10
+		       (* *sample-rate* len 0.95) 0))
+(defun arpeg-0 (octave)
+  (->> (* octave freq)
+       (square-stream)
+       (envelope (list 10 (* *sample-rate* len) 10 1 0))
+       (stream-delay (* (- delay len) *sample-rate*))
+       (loop for freq in '(261.63 329.63 392.00)
+	     for len  in '(3/16 3/16 2/16)
+	     summing len into delay
+	     collect)
+       (apply #'stream-add)
+       ;; TODO: envelope over entire measure
+       ))
+
+(defun arpeg-1 (octave)
+  (envelope (cond ((= octave 1)
+		   (list 0.2 (/ *sample-rate* 2) 0.5))
+		  ((= octave 2)
+		   (list 0.5 (/ *sample-rate* 4) 1
+			 (/ *sample-rate* 4) 0.5))
+		  ((= octave 3)
+		   (list 0.5 (/ *sample-rate* 2) 0.2)))
+	    (arpeg-0 octave)))
+
+(defun arpeg-2 ()
+  (stream-add (arpeg-0 1)
+	      (stream-delay (/ *sample-rate* 2) (arpeg-0 2))))
