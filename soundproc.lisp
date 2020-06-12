@@ -25,13 +25,13 @@
 (defparameter *sample-rate* 8000)
 (defparameter *sample-depth-bytes* 1)
 
-;; Writes a lazy stream to file as a .WAV file in PCM format.
-;; Does not currently write metadata - this can be extended by including an
-;; INFO chunk.
-;; http://soundfile.sapp.org/doc/WaveFormat/
 (defun write-wave (sound-stream sample-count
 		   &optional (filename "./out.wav"))
-  "Writes n samples of a sound stream to WAVE file."
+  "Writes n samples of a sound stream to WAVE file.
+   Writes a lazy stream to file as a .WAV file in PCM format.
+   Does not currently write metadata - this can be extended by including an
+   INFO chunk.
+   http://soundfile.sapp.org/doc/WaveFormat/"
   (let ((sample-size (* *num-channels* *sample-depth-bytes*)))
     (with-open-file (out filename
                          :direction :output
@@ -88,6 +88,16 @@
     `(labels ((self ,arg-syms ,body))
        (self ,@arg-vals))))
 
+;; TODO: replace l-stream with nlet?
+(defmacro nlet (name arg-binds &rest body)
+  "Scheme's named let: defines a function with names, arguments and
+  initial values, and a function body.
+  Named recursion is allowed within the function body."
+  (let ((arg-syms (mapcar #'first  arg-binds))
+	(arg-vals (mapcar #'second arg-binds)))
+    `(labels ((,name ,arg-syms ,@body))
+       (,name ,arg-vals))))
+
 (defun const-stream (&optional (value 0))
   "Generates a sample stream of silence."
   ;; cache the cons cell to save on CPU and memory
@@ -125,7 +135,7 @@
 	    (self (l-cdr freq-s)
 		  (l-cdr duty-s)
 		  (let ((incr (/ (car freq-s) *sample-rate*)))
-		    (if (< (+ value incr) 1)
+		    (if (<= (+ value incr) 1)
 			(+ value incr)
 			incr))))))
 
@@ -141,23 +151,23 @@
 			(+ value incr)
 			(+ -1 incr)))))))
 
-;; The defining property of white noise is that it contains all frequencies,
-;; all with the same amplitude. This is computationally equivalent to
-;; generating Gaussian-distributed random samples. The Bates Distributtion
-;; is used as a replacement because not all properties of the Gaussian
-;; Distribution are desired or needed e.g. infinite range.
 (defun white-noise (&optional (granularity 16))
   "Generates an approximation of white noise.
   Granularity is the n parameter to the Bates distribution:
-  higher values better approximate white noise."
-  (l-cons (->
-	   ;; Average N uniformly random variables
-	   ;; By the Central Limit Theorem, this approximates the Gaussian
-	   (loop for i from 1 to granularity
-		 sum (random 2.0))
-	   (/ granularity)
-	   (- 1)	      ; center range on 0 to match other waves
-	   (* (sqrt granularity)))  ; normalize variance (i.e. volume)
+  higher values better approximate white noise.
+  The defining property of white noise is that it contains all frequencies,
+  all with the same amplitude. This is computationally equivalent to
+  generating Gaussian-distributed random samples. The Bates Distributtion
+  is used as a replacement because not all properties of the Gaussian
+  Distribution are desired or needed e.g. infinite range."
+  ;; Average N uniformly random variables
+  ;; By the Central Limit Theorem, this approximates the Gaussian
+  (l-cons (-> (loop for i from 1 to granularity
+		    sum (random 2.0))
+	      (/ granularity)
+	      ;; center range on 0 and nomralize variance
+	      (- 1)
+	      (* (sqrt granularity)))
 	  (white-noise granularity)))
 
 ;;; Non-auditory simple streams
@@ -256,16 +266,46 @@
   (amplify (apply #'piecewise amps-and-timers)
 	   stream))
 
+;; Convolutions
+
+(defun convolve (convolution stream)
+  (l-stream ((conv-list convolution)
+	     ;; create a circular buffer of samples
+	     (samp-list (let ((circular-list
+				(make-list
+				 (length convolution)
+				 :initial-element 0)))
+			  (setf (cdr (last circular-list))
+				circular-list)
+			  circular-list))
+	     (stream stream))
+    ;; value could be optimized by subtracting
+    ;; (* (first conv-list) (first samp-list))
+    ;; and adding
+    ;; (* (last conv-list) (last samp-list))
+    ;; at each step
+    (l-cons (loop for i in conv-list
+		  for j in samp-list
+		  sum (* i j))
+	    (progn (setf (car samp-list) (car stream))
+		   (self conv-list
+			 (cdr samp-list)
+			 (l-cdr stream))))))
+
+(defun sinc (theta)
+  (if (= theta 0)
+      1
+      (/ (sin theta) theta)))
+
 ;;; Transducer functionality (currently unused)
 
 (defmacro deffilter (name args body)
   "Defines a filter as a transducer if a stream argument is not provided."
-  (let ((args-stream (append args '(&optional stream))))
-    `(defun ,name ,args-stream
-       (if stream
-	   ,body
-	   (lambda (stream)
-	     (,name ,@args stream))))))
+  `(defun ,name (,@ args &optional stream)
+    (if stream
+       ,body
+       (lambda (stream)
+         (,name ,@args stream)))))
 
 (defun compose (filter &rest filters)
   "Composes several transducers into one."
@@ -280,95 +320,3 @@
       (l-cons (car stream)
 	      (effect-delay effect (- delay 1) (l-cdr stream)))
       (funcall effect stream)))
-
-;;; Instruments
-
-(defun bell (base-freq &optional (hcount 20))
-  (apply #'stream-add
-	 (loop for i from 1 to hcount
-	       collect
-	       (let ((freq (->> (+ 0.8 (random 0.4))
-				(* i base-freq))))
-		 (amplify (->> (/ (* *sample-rate* 800) freq)
-				 (exp-decay)
-				 (amplify 10))
-			    (sine-stream freq))))))
-
-(defmacro partials ()
-  "Compile time series of random partial frequencies"
-  (cons 'list
-	(loop for i from 2 to 20
-	      collect
-					;(+ i (- (random 0.1) 0.05)
-	      (* i (+ 0.8 (random 0.4)))
-		 )))
-
-(defun bell-2 (base-freq)
-  (->> (cons (sine-stream base-freq)
-	     (loop for p in (partials)
-		   collect (sine-stream (* p base-freq))))
-       (apply #'stream-add)
-       (amplify 8)
-       (low-sweep (exp-decay 6000))))
-
-(defun glass-harp (base-freq)
-  (amplify 20
-  (amplify (stream-add (const-stream 1.0)
-		       (sine-stream 2))
-	   (sine-stream base-freq))))
-
-(defun pluck (freq)
-  (effect-delay (lambda (stream) (low-sweep (exp-decay 500)
-					    stream))
-		100
-		(envelope '(0 100 30)
-			  (square-stream freq))))
-
-(defun pluck (freq)
-  (->> (saw-stream freq)
-       ;; TODO: base constants on sample rate (8000)
-       (low-sweep (exp-decay 600))
-       ;; low-sweep doesn't reset to zero amplitude
-       (envelope '(0 100 30 6900 30 1000 0))))
-
-(defun pluck-2 (freq)
-  (->> (square-stream freq)
-       (envelope (list 0 (* *sample-rate* 0.01) 10
-		       (* *sample-rate* 0.24) 10 1 0))))
-
-(defun arpeg-0 (octave)
-  (apply #'stream-add
-	 (loop for freq in '(277.18 311.13 415.30)
-	       for i from 0
-	       collect (stream-delay (* i (/ *sample-rate* 4))
-				     (pluck-2 (* octave freq))))))
-
-       (envelope (list 0
-		       (* *sample-rate* len 0.05) 10
-		       (* *sample-rate* len 0.95) 0))
-(defun arpeg-0 (octave)
-  (->> (* octave freq)
-       (square-stream)
-       (envelope (list 10 (* *sample-rate* len) 10 1 0))
-       (stream-delay (* (- delay len) *sample-rate*))
-       (loop for freq in '(261.63 329.63 392.00)
-	     for len  in '(3/16 3/16 2/16)
-	     summing len into delay
-	     collect)
-       (apply #'stream-add)
-       ;; TODO: envelope over entire measure
-       ))
-
-(defun arpeg-1 (octave)
-  (envelope (cond ((= octave 1)
-		   (list 0.2 (/ *sample-rate* 2) 0.5))
-		  ((= octave 2)
-		   (list 0.5 (/ *sample-rate* 4) 1
-			 (/ *sample-rate* 4) 0.5))
-		  ((= octave 3)
-		   (list 0.5 (/ *sample-rate* 2) 0.2)))
-	    (arpeg-0 octave)))
-
-(defun arpeg-2 ()
-  (stream-add (arpeg-0 1)
-	      (stream-delay (/ *sample-rate* 2) (arpeg-0 2))))
